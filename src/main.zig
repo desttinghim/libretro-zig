@@ -304,3 +304,28 @@ export fn retro_cheat_reset(id: c_uint) void {
 export fn retro_cheat_set(id: c_uint, enabled: bool, code: [*]const u8) void {
     std.log.debug("{s}:{}", .{ @src().fn_name, @src().line });
 }
+
+pub fn log(
+    comptime level: std.log.Level,
+    comptime scope: @TypeOf(.EnumLiteral),
+    comptime format: []const u8,
+    args: anytype,
+) void {
+    if (log_cb) |log_cb_not_null| {
+        const retro_log_level: c.retro_log_level = switch (level) {
+            .debug => .RETRO_LOG_DEBUG,
+            .info => .RETRO_LOG_INFO,
+            .warn => .RETRO_LOG_WARN,
+            .err => .RETRO_LOG_ERROR,
+            else => |l| @compileError("Unsupported log level " ++ std.meta.tagName(l)),
+        };
+
+        var buf: [2048]u8 = undefined;
+        const format_with_newline = format ++ "\n";
+        const str = std.fmt.bufPrintZ(&buf, format_with_newline, args) catch {
+            log_cb_not_null(retro_log_level, format_with_newline);
+            return;
+        };
+        log_cb_not_null(retro_log_level, str.ptr);
+    }
+}
