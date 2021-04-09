@@ -14,9 +14,17 @@ var frame_buf: []u32 = undefined;
 var last_aspect: f32 = undefined;
 var last_sample_rate: f32 = undefined;
 
+const BASE_WIDTH = 320;
+const BASE_HEIGHT = 240;
+const MAX_WIDTH = 1024;
+const MAX_HEIGHT = 1024;
+
+var width: u32 = BASE_WIDTH;
+var height: u32 = BASE_HEIGHT;
+
 export fn retro_init() void {
     std.log.debug("{s}:{}", .{ @src().fn_name, @src().line });
-    frame_buf = alloc.alloc(u32, 320 * 240) catch |e| std.debug.panic("error allocating screen: {}", .{e});
+    frame_buf = alloc.alloc(u32, MAX_WIDTH * MAX_HEIGHT) catch |e| std.debug.panic("error allocating screen: {}", .{e});
 }
 
 export fn retro_deinit() void {
@@ -81,10 +89,10 @@ export fn retro_get_system_av_info(info: *c.retro_system_av_info) void {
     };
 
     info.geometry = .{
-        .base_width = 320,
-        .base_height = 240,
-        .max_width = 320,
-        .max_height = 240,
+        .base_width = BASE_WIDTH,
+        .base_height = BASE_HEIGHT,
+        .max_width = MAX_WIDTH,
+        .max_height = MAX_HEIGHT,
         .aspect_ratio = aspect,
     };
 
@@ -102,6 +110,7 @@ export fn retro_set_environment(env_cb: c.retro_environment_t) void {
 
     var retro_vars = [_]c.retro_variable{
         .{ .key = "test_aspect", .value = "Aspect Ratio; 4:3|16:9" },
+        .{ .key = "test_resolution", .value = "Internal resolution; 320x240|360x480|480x272|512x384|512x512|640x240|640x448|640x480|720x576|800x600|960x720|1024x768" },
         .{ .key = "test_samplerate", .value = "Sample Rate; 30000|20000" },
         .{ .key = "test_analog_mouse", .value = "Left Analog as mouse; true|false" },
         .{ .key = "test_analog_mouse_relative", .value = "Analog mouse is relative; false|true" },
@@ -169,8 +178,37 @@ export fn retro_reset() void {
 }
 
 export fn retro_run() void {
+    var updated = false;
+    if (environ_cb.?(c.RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE, &updated) and updated)
+        update_variables();
     update_input();
     render_checkered();
+}
+
+fn update_variables() void {
+    std.log.debug("{s}:{}", .{ @src().fn_name, @src().line });
+    std.log.debug("Update variables", .{});
+    var retro_var: c.retro_variable = .{
+        .key = "test_resolution",
+        .value = undefined,
+    };
+
+    if (environ_cb.?(c.RETRO_ENVIRONMENT_GET_VARIABLE, &retro_var) and retro_var.value != null) {
+        const value = std.mem.spanZ(retro_var.value);
+        var tokens = std.mem.tokenize(value, "x");
+
+        const tok1 = tokens.next();
+        const tok2 = tokens.next();
+
+        if (tok1) |t1| {
+            if (tok2) |t2| {
+                width = std.fmt.parseUnsigned(u32, t1, 10) catch width;
+                height = std.fmt.parseUnsigned(u32, t2, 10) catch height;
+            }
+        }
+
+        std.log.debug("Width and Height set to {}", .{value});
+    }
 }
 
 fn update_input() void {
@@ -207,8 +245,8 @@ fn render_checkered() void {
     var stride: usize = 0;
 
     var fb = std.mem.zeroes(c.retro_framebuffer);
-    fb.width = 320;
-    fb.height = 240;
+    fb.width = width;
+    fb.height = height;
     fb.access_flags = c.RETRO_MEMORY_ACCESS_WRITE;
 
     if (environ_cb.?(c.RETRO_ENVIRONMENT_GET_CURRENT_SOFTWARE_FRAMEBUFFER, &fb) and fb.format == .RETRO_PIXEL_FORMAT_XRGB8888) {
@@ -216,28 +254,30 @@ fn render_checkered() void {
         stride = fb.pitch >> 2;
     } else {
         buf = frame_buf.ptr;
-        stride = 320;
+        stride = width;
     }
 
     const color_r: u32 = 0xff << 16;
     const color_g: u32 = 0xff << 8;
 
     var y: i32 = 0;
-    while (y < 240) : (y += 1) {
+    while (y < height) : (y += 1) {
         const line = buf[@intCast(u32, y) * stride .. @intCast(u32, y + 1) * stride];
         const index_y = ((y - y_coord) >> 4) & 1;
         var x: i32 = 0;
-        while (x < 320) : (x += 1) {
+        while (x < width) : (x += 1) {
             const index_x = ((x - x_coord) >> 4) & 1;
             line[@intCast(usize, x)] = if ((index_y ^ index_x) != 0) color_r else color_g;
         }
     }
 
-    video_cb.?(buf, 320, 240, stride << 2);
+    video_cb.?(buf, width, height, stride << 2);
 }
 
 export fn retro_load_game(info: ?*const c.retro_game_info) bool {
     std.log.debug("{s}:{}", .{ @src().fn_name, @src().line });
+
+    update_variables();
 
     var desc = [_]c.retro_input_descriptor{
         .{ .port = 0, .device = c.RETRO_DEVICE_JOYPAD, .index = 0, .id = c.RETRO_DEVICE_ID_JOYPAD_LEFT, .description = "Left" },
@@ -303,29 +343,4 @@ export fn retro_cheat_reset(id: c_uint) void {
 
 export fn retro_cheat_set(id: c_uint, enabled: bool, code: [*]const u8) void {
     std.log.debug("{s}:{}", .{ @src().fn_name, @src().line });
-}
-
-pub fn log(
-    comptime level: std.log.Level,
-    comptime scope: @TypeOf(.EnumLiteral),
-    comptime format: []const u8,
-    args: anytype,
-) void {
-    if (log_cb) |log_cb_not_null| {
-        const retro_log_level: c.retro_log_level = switch (level) {
-            .debug => .RETRO_LOG_DEBUG,
-            .info => .RETRO_LOG_INFO,
-            .warn => .RETRO_LOG_WARN,
-            .err => .RETRO_LOG_ERROR,
-            else => |l| @compileError("Unsupported log level " ++ std.meta.tagName(l)),
-        };
-
-        var buf: [2048]u8 = undefined;
-        const format_with_newline = format ++ "\n";
-        const str = std.fmt.bufPrintZ(&buf, format_with_newline, args) catch {
-            log_cb_not_null(retro_log_level, format_with_newline);
-            return;
-        };
-        log_cb_not_null(retro_log_level, str.ptr);
-    }
 }
