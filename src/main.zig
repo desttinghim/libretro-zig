@@ -3,6 +3,7 @@ const testing = std.testing;
 const c = @cImport({
     @cInclude("libretro.h");
 });
+const gl = @import("gl_es_2v0.zig");
 
 // Basically a port of the following:
 // https://github.com/libretro/libretro-samples/blob/master/tests/test/libretro-test.c
@@ -11,8 +12,9 @@ var gpa = std.heap.GeneralPurposeAllocator(.{}){};
 const alloc = &gpa.allocator;
 
 var frame_buf: []u32 = undefined;
-var last_aspect: f32 = undefined;
-var last_sample_rate: f32 = undefined;
+var last_aspect: f32 = 0.0;
+var last_sample_rate: f32 = 0.0;
+var hw_render: c.retro_hw_render_callback = undefined;
 
 const BASE_WIDTH = 320;
 const BASE_HEIGHT = 240;
@@ -21,6 +23,56 @@ const MAX_HEIGHT = 1024;
 
 var width: u32 = BASE_WIDTH;
 var height: u32 = BASE_HEIGHT;
+
+var prog: gl.GLuint = 0;
+var vbo: gl.GLuint = 0;
+
+const vertex_shader = @embedFile("shader.vert");
+const fragment_shader = @embedFile("shader.frag");
+
+fn compile_program() void {
+    prog = gl.createProgram();
+    var vert = gl.createShader(gl.VERTEX_SHADER);
+    var frag = gl.createShader(gl.FRAGMENT_SHADER);
+
+    var vert_src = [_][*c]const u8{vertex_shader};
+    var frag_src = [_][*c]const u8{fragment_shader};
+    gl.shaderSource(vert, 1, &vert_src, &@intCast(c_int, vertex_shader.len));
+    gl.shaderSource(frag, 1, &frag_src, &@intCast(c_int, vertex_shader.len));
+    gl.compileShader(vert);
+    gl.compileShader(frag);
+
+    gl.attachShader(prog, vert);
+    gl.attachShader(prog, frag);
+    gl.linkProgram(prog);
+    gl.deleteShader(vert);
+    gl.deleteShader(frag);
+}
+
+fn setup_vao() void {
+    const vertex_data = &[_]gl.GLfloat{
+        -0.5, -0.5,
+        0.5,  -0.5,
+        -0.5, 0.5,
+        0.5,  0.5,
+        1.0,  1.0,
+        1.0,  1.0,
+        1.0,  1.0,
+        0.0,  1.0,
+        0.0,  1.0,
+        1.0,  1.0,
+        1.0,  0.0,
+        1.0,  1.0,
+    };
+
+    gl.useProgram(prog);
+    gl.genBuffers(1, &vbo);
+    gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
+    gl.bufferData(gl.ARRAY_BUFFER, vertex_data.len * @sizeOf(gl.GLfloat), vertex_data, gl.STATIC_DRAW);
+
+    gl.bindBuffer(gl.ARRAY_BUFFER, 0);
+    gl.useProgram(0);
+}
 
 export fn retro_init() void {
     std.log.debug("{s}:{}", .{ @src().fn_name, @src().line });
@@ -145,10 +197,12 @@ export fn retro_set_environment(env_cb: c.retro_environment_t) void {
 
 export fn retro_set_audio_sample(cb: c.retro_audio_sample_t) void {
     std.log.debug("{s}:{}", .{ @src().fn_name, @src().line });
+    audio_cb = cb;
 }
 
 export fn retro_set_audio_sample_batch(cb: c.retro_audio_sample_batch_t) void {
     std.log.debug("{s}:{}", .{ @src().fn_name, @src().line });
+    audio_batch_cb = cb;
 }
 
 export fn retro_set_input_poll(cb: c.retro_input_poll_t) void {
@@ -182,7 +236,8 @@ export fn retro_run() void {
     if (environ_cb.?(c.RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE, &updated) and updated)
         update_variables();
     update_input();
-    render_checkered();
+    // render_checkered();
+    render_gl();
 }
 
 fn update_variables() void {
@@ -207,7 +262,7 @@ fn update_variables() void {
             }
         }
 
-        std.log.debug("Width and Height set to {}", .{value});
+        std.log.debug("Width and Height set to {s}", .{value});
     }
 }
 
@@ -274,6 +329,106 @@ fn render_checkered() void {
     video_cb.?(buf, width, height, stride << 2);
 }
 
+var frame_count: u32 = 0;
+
+fn render_gl() void {
+    gl.bindFramebuffer(gl.FRAMEBUFFER, @intCast(c_uint, hw_render.get_current_framebuffer.?()));
+
+    gl.clearColor(0.3, 0.4, 0.5, 1.0);
+    gl.viewport(0, 0, @intCast(c_int, width), @intCast(c_int, height));
+    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT | gl.STENCIL_BUFFER_BIT);
+
+    gl.useProgram(prog);
+    defer gl.useProgram(0);
+
+    gl.enable(gl.DEPTH_TEST);
+
+    gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
+    const vloc = @intCast(c_uint, gl.getAttribLocation(prog, "aVertex"));
+    gl.vertexAttribPointer(vloc, 2, gl.FLOAT, gl.FALSE, 0, null);
+    gl.enableVertexAttribArray(vloc);
+    defer gl.disableVertexAttribArray(vloc);
+
+    const cloc = @intCast(c_uint, gl.getAttribLocation(prog, "aColor"));
+    gl.vertexAttribPointer(cloc, 4, gl.FLOAT, gl.FALSE, 0, @intToPtr(*c_void, 8 * @sizeOf(gl.GLfloat)));
+    gl.enableVertexAttribArray(cloc);
+    gl.bindBuffer(gl.ARRAY_BUFFER, 0);
+    defer gl.disableVertexAttribArray(cloc);
+
+    const loc = gl.getUniformLocation(prog, "uMVP");
+
+    const angle = @intToFloat(f32, frame_count) / 100.0;
+    var cos_angle = std.math.cos(angle);
+    var sin_angle = std.math.sin(angle);
+
+    const mvp = &[_]gl.GLfloat{
+        cos_angle, -sin_angle, 0, 0,
+        sin_angle, cos_angle,  0, 0,
+        0,         0,          1, 0,
+        0,         0,          0, 1,
+    };
+    gl.uniformMatrix4fv(loc, 1, gl.FALSE, mvp);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+
+    cos_angle *= 0.5;
+    sin_angle *= 0.5;
+
+    const mvp2 = &[_]gl.GLfloat{
+        cos_angle, -sin_angle, 0,   0,
+        sin_angle, cos_angle,  0,   0,
+        0,         0,          1,   0,
+        0.4,       0.5,        0.2, 1,
+    };
+
+    gl.uniformMatrix4fv(loc, 1, gl.FALSE, mvp2);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+
+    frame_count += 1;
+
+    const RETRO_HW_FRAME_BUFFER_VALID = @intToPtr(*c_void, @bitCast(usize, @as(isize, -1)));
+
+    video_cb.?(RETRO_HW_FRAME_BUFFER_VALID, width, height, 0);
+}
+
+fn get_proc_address(_: u8, proc: [:0]const u8) ?*const c_void {
+    const get_proc_addr = hw_render.get_proc_address.?;
+    const res = get_proc_addr(proc);
+    return res;
+}
+
+export fn context_reset() void {
+    std.log.info("Context reset!", .{});
+
+    var ctx: u8 = 0;
+    gl.load(ctx, get_proc_address) catch |e| std.log.info("Couldn't initialize GL", .{});
+
+    compile_program();
+    setup_vao();
+}
+
+export fn context_destroy() void {
+    std.log.info("Context destroy!", .{});
+
+    gl.deleteBuffers(1, &vbo);
+    vbo = 0;
+    gl.deleteProgram(prog);
+    prog = 0;
+}
+
+fn retro_init_hw_context() bool {
+    hw_render.context_type = .RETRO_HW_CONTEXT_OPENGLES2;
+    hw_render.context_reset = context_reset;
+    hw_render.context_destroy = context_destroy;
+    hw_render.depth = true;
+    hw_render.stencil = true;
+    hw_render.bottom_left_origin = true;
+
+    if (!environ_cb.?(c.RETRO_ENVIRONMENT_SET_HW_RENDER, &hw_render))
+        return false;
+
+    return true;
+}
+
 export fn retro_load_game(info: ?*const c.retro_game_info) bool {
     std.log.debug("{s}:{}", .{ @src().fn_name, @src().line });
 
@@ -292,6 +447,11 @@ export fn retro_load_game(info: ?*const c.retro_game_info) bool {
     var fmt = c.retro_pixel_format.RETRO_PIXEL_FORMAT_XRGB8888;
     if (!environ_cb.?(c.RETRO_ENVIRONMENT_SET_PIXEL_FORMAT, &fmt)) {
         std.log.info("XRGB8888 is not supported", .{});
+        return false;
+    }
+
+    if (!retro_init_hw_context()) {
+        std.log.info("HW Context could not be initialized, exiting...", .{});
         return false;
     }
 
