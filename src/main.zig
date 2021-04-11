@@ -332,7 +332,12 @@ fn render_checkered() void {
 var frame_count: u32 = 0;
 
 fn render_gl() void {
-    gl.bindFramebuffer(gl.FRAMEBUFFER, @intCast(c_uint, hw_render.get_current_framebuffer.?()));
+    const res = hw_render.get_current_framebuffer.?();
+    if (res < 0) {
+        std.log.info("Could not get framebuffer", .{});
+        return;
+    }
+    gl.bindFramebuffer(gl.FRAMEBUFFER, @intCast(c_uint, res));
 
     gl.clearColor(0.3, 0.4, 0.5, 1.0);
     gl.viewport(0, 0, @intCast(c_int, width), @intCast(c_int, height));
@@ -344,12 +349,37 @@ fn render_gl() void {
     gl.enable(gl.DEPTH_TEST);
 
     gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
-    const vloc = @intCast(c_uint, gl.getAttribLocation(prog, "aVertex"));
+    // const attr1 = gl.getAttribLocation(prog, "aVertex");
+    // if (attr1 < 0) {
+    //     std.log.info("Could not get aVertex attribute!", .{});
+    //     var err = gl.getError();
+    //     while (err != gl.NO_ERROR) {
+    //         const errstr = switch (err) {
+    //             gl.NO_ERROR => "No error",
+    //             gl.INVALID_ENUM => "Invalid enum",
+    //             gl.INVALID_VALUE => "Invalid value",
+    //             gl.INVALID_OPERATION => "Invalid operation",
+    //             gl.OUT_OF_MEMORY => "Out of memory",
+    //             // gl.STACK_OVERFLOW => "Stack Overflow",
+    //             // gl.STACK_UNDERFLOW => "Stack Underflow",
+    //             // gl.TABLE_TOO_LARGE => "Table too large",
+    //             gl.INVALID_FRAMEBUFFER_OPERATION => "Invalid framebuffer operation",
+    //             else => "Unknown",
+    //         };
+    //         std.log.info("ERROR: {} {s}", .{ err, errstr });
+    //         err = gl.getError();
+    //     }
+    // }
+    const vloc = 0; // @intCast(c_uint, attr1);
     gl.vertexAttribPointer(vloc, 2, gl.FLOAT, gl.FALSE, 0, null);
     gl.enableVertexAttribArray(vloc);
     defer gl.disableVertexAttribArray(vloc);
 
-    const cloc = @intCast(c_uint, gl.getAttribLocation(prog, "aColor"));
+    // const attr2 = gl.getAttribLocation(prog, "aColor");
+    // if (attr2 < 0) {
+    //     std.log.info("Could not get aColor attribute, result: {}", .{attr2});
+    // }
+    const cloc = 1; //@intCast(c_uint, attr2);
     gl.vertexAttribPointer(cloc, 4, gl.FLOAT, gl.FALSE, 0, @intToPtr(*c_void, 8 * @sizeOf(gl.GLfloat)));
     gl.enableVertexAttribArray(cloc);
     gl.bindBuffer(gl.ARRAY_BUFFER, 0);
@@ -416,7 +446,7 @@ export fn context_destroy() void {
 }
 
 fn retro_init_hw_context() bool {
-    hw_render.context_type = .RETRO_HW_CONTEXT_OPENGLES2;
+    hw_render.context_type = .RETRO_HW_CONTEXT_OPENGL;
     hw_render.context_reset = context_reset;
     hw_render.context_destroy = context_destroy;
     hw_render.depth = true;
